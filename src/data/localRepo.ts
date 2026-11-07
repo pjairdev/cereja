@@ -1,12 +1,15 @@
 import { onlyDigits, uid } from '../lib/business'
+import { sendCodeEmail } from '../lib/email'
+import { OtpStore, normalizeEmail } from '../lib/otp'
 import { availableSlots, isFree, pickPro } from '../lib/scheduling'
-import type { Appointment, Client, DB, Professional, Service, StaffUser } from '../lib/types'
-import { BookingConflictError, type BookingInput, type NewUserInput, type Repo } from './repo'
+import type { Appointment, Client, ClientAccount, DB, Professional, Service, StaffUser } from '../lib/types'
+import { BookingConflictError, LoginRequiredError, type BookingInput, type LoginRequest, type NewUserInput, type Repo } from './repo'
 import { SEED_USERS, buildSeed } from './seed'
 
 const DB_KEY = 'cereja.db.v1'
 const AUTH_KEY = 'cereja.auth.v1'
 const SESSION_KEY = 'cereja.session.v1'
+const CLIENT_KEY = 'cereja.client.v1' // a cliente continua logada entre visitas
 
 type Creds = Record<string, { salt: string; hash: string }> // por id de usuário
 
@@ -42,6 +45,9 @@ export class LocalRepo implements Repo {
   private creds: Creds = {}
   private listeners = new Set<() => void>()
   private sessionUserId: string | null = null
+  private clientId: string | null = null
+  private otp = new OtpStore()
+  private accountCache: { src: Client; acc: ClientAccount } | null = null
 
   async init() {
     const raw = safeGet(() => localStorage, DB_KEY)
@@ -57,6 +63,7 @@ export class LocalRepo implements Repo {
       await this.seed()
     }
     this.sessionUserId = safeGet(() => sessionStorage, SESSION_KEY)
+    this.clientId = safeGet(() => localStorage, CLIENT_KEY)
     window.addEventListener('storage', (e) => {
       if (e.key === DB_KEY && e.newValue) {
         this.db = JSON.parse(e.newValue)
@@ -101,7 +108,91 @@ export class LocalRepo implements Repo {
     }
   }
 
+  // ---------- Conta da cliente ----------
+
+  currentClient(): ClientAccount | null {
+    const c = this.db.clients.find((x) => x.id === this.clientId)
+    if (!c || !c.email) return null
+    if (this.accountCache?.src !== c) {
+      this.accountCache = {
+        src: c,
+        acc: { id: c.id, email: c.email, name: c.name, phone: c.phone, verifiedAt: c.emailVerifiedAt ?? c.createdAt },
+      }
+    }
+    return this.accountCache.acc
+  }
+
+  async requestClientLogin(email: string): Promise<LoginRequest> {
+    const code = await this.otp.issue(email)
+    const sent = await sendCodeEmail(normalizeEmail(email), code)
+    return { method: 'code', sent, demoCode: sent ? undefined : code }
+  }
+
+  async verifyClientCode(email: string, code: string): Promise<ClientAccount> {
+    await this.otp.verify(email, code)
+    const key = normalizeEmail(email)
+    const now = new Date().toISOString()
+    let c = this.db.clients.find((x) => x.email === key)
+    if (c) {
+      const verified = { ...c, emailVerifiedAt: now }
+      this.commit((db) => ({ ...db, clients: db.clients.map((x) => (x.id === verified.id ? verified : x)) }))
+      c = verified
+    } else {
+      c = { id: uid('c'), name: '', phone: '', email: key, emailVerifiedAt: now, createdAt: now }
+      const created = c
+      this.commit((db) => ({ ...db, clients: [...db.clients, created] }))
+    }
+    this.setClientSession(c.id)
+    return this.currentClient()!
+  }
+
+  pendingEmailLink() {
+    return false
+  }
+
+  async completeEmailLink(): Promise<ClientAccount> {
+    throw new Error('No modo local o login é feito por código.')
+  }
+
+  async saveClientProfile(profile: { name: string; phone: string }): Promise<ClientAccount> {
+    const me = this.currentClient()
+    if (!me) throw new LoginRequiredError()
+    const name = profile.name.trim()
+    const phone = onlyDigits(profile.phone)
+    if (name.length < 2) throw new Error('Informe seu nome.')
+    if (phone.length < 10) throw new Error('Informe um WhatsApp válido com DDD.')
+
+    // Se esse WhatsApp já tem histórico no salão (cadastro feito no balcão), une as duas fichas.
+    const history = this.db.clients.find((c) => c.id !== me.id && !c.email && onlyDigits(c.phone) === phone)
+    const mineHasAppts = this.db.appointments.some((a) => a.clientId === me.id)
+    if (history && !mineHasAppts) {
+      const merged: Client = { ...history, name, email: me.email, emailVerifiedAt: me.verifiedAt }
+      this.commit((db) => ({
+        ...db,
+        clients: db.clients.filter((c) => c.id !== me.id).map((c) => (c.id === history.id ? merged : c)),
+      }))
+      this.setClientSession(history.id)
+    } else {
+      this.commit((db) => ({ ...db, clients: db.clients.map((c) => (c.id === me.id ? { ...c, name, phone } : c)) }))
+    }
+    return this.currentClient()!
+  }
+
+  async logoutClient() {
+    this.setClientSession(null)
+  }
+
+  private setClientSession(id: string | null) {
+    this.clientId = id
+    safeSet(() => localStorage, CLIENT_KEY, id)
+    this.emit()
+  }
+
+  // ---------- Agendamento ----------
+
   async book(input: BookingInput): Promise<Appointment> {
+    const account = this.currentClient()
+    if (input.source === 'site' && !account) throw new LoginRequiredError()
     const service = this.db.services.find((s) => s.id === input.serviceId && s.active)
     if (!service) throw new Error('Serviço indisponível.')
     const phone = onlyDigits(input.phone)
@@ -120,18 +211,23 @@ export class LocalRepo implements Repo {
     const proId = input.proId === 'any' ? pickPro(slot.proIds, this.db.appointments, input.date) : input.proId
     if (!isFree(this.db.appointments, proId, input.date, slot.start, slot.end)) throw new BookingConflictError()
 
-    let client = this.db.clients.find((c) => onlyDigits(c.phone) === phone)
     const now = new Date().toISOString()
-    const newClient: Client | null = client
-      ? null
-      : { id: uid('c'), name: input.name.trim(), phone, createdAt: now }
-    client = client ?? newClient!
+    let client: Client | undefined
+    let newClient: Client | null = null
+    if (input.source === 'site' && account) {
+      client = this.db.clients.find((c) => c.id === account.id)!
+    } else {
+      // agendamento feito pela equipe: procura a ficha pelo WhatsApp
+      client = this.db.clients.find((c) => onlyDigits(c.phone) === phone)
+      if (!client) client = newClient = { id: uid('c'), name: input.name.trim(), phone, createdAt: now }
+    }
 
     const appt: Appointment = {
       id: uid('a'),
       clientId: client.id,
       clientName: input.name.trim(),
       clientPhone: phone,
+      ...(input.source === 'site' && account ? { clientEmail: account.email, clientUid: account.id } : {}),
       serviceId: service.id,
       proId,
       date: input.date,
@@ -155,14 +251,16 @@ export class LocalRepo implements Repo {
     return appt
   }
 
-  async findByPhone(phone: string) {
-    const d = onlyDigits(phone)
-    return this.db.appointments.filter((a) => onlyDigits(a.clientPhone) === d)
+  async myAppointments() {
+    const me = this.currentClient()
+    if (!me) return []
+    return this.db.appointments.filter((a) => a.clientId === me.id)
   }
 
-  async cancelByClient(id: string, phone: string) {
+  async cancelMine(id: string) {
+    const me = this.currentClient()
     const a = this.db.appointments.find((x) => x.id === id)
-    if (!a || onlyDigits(a.clientPhone) !== onlyDigits(phone)) throw new Error('Agendamento não encontrado.')
+    if (!me || !a || a.clientId !== me.id) throw new Error('Agendamento não encontrado.')
     await this.updateAppointment(id, { status: 'cancelado' })
   }
 
@@ -274,6 +372,8 @@ export class LocalRepo implements Repo {
   }
 
   async resetDemo() {
+    this.clientId = null
+    safeSet(() => localStorage, CLIENT_KEY, null)
     await this.seed()
     this.emit()
   }

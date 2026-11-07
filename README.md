@@ -28,12 +28,18 @@ Painel: `/#/admin`. No modo local, todos os acessos usam a senha `cereja123`:
 - Serviços mais realizados (ranking calculado dos atendimentos concluídos nos últimos 30 dias).
 - Equipe com nome, função, serviços e **próximo horário livre de hoje** calculado da agenda.
 - Local com status **Aberto/Fechado** em tempo real (fuso America/Bahia), horários e rota.
+- **Login da cliente com e-mail verificado antes de agendar.** Modo local: código de 6 dígitos
+  (vale 10 min, 5 tentativas, reenvio a cada 30 s, uso único). Firebase: link de login enviado ao e-mail.
+  No primeiro acesso pede nome e WhatsApp; se o WhatsApp já tem histórico no salão, as fichas são unidas.
+  A cliente continua logada entre visitas e sai pelo menu com o nome dela no topo.
+- Quem é da equipe e está logado vê o botão **Painel · Administradora/Recepção/Profissional** no topo do site.
+  Administradora e recepção logadas agendam direto em nome da cliente, sem o login por e-mail.
 - Agendamento real em 5 passos: serviço → profissional (ou primeira livre) → dia/horário → dados → pagamento.
   Os horários respeitam expediente, duração do serviço, agenda de cada profissional e antecedência de 30 min,
   e são revalidados no momento de gravar (sem reserva dupla).
 - Pagamento: **Pix com QR Code e copia e cola reais** (BR Code EMV com CRC16, testado contra o exemplo do
   Banco Central), cartão (link de pagamento configurável ou maquininha) ou no salão.
-- "Meus horários": consulta e cancelamento pelo WhatsApp (até 2 h antes), arquivo .ics e confirmação no WhatsApp.
+- "Meus horários": lista os horários da conta logada, com cancelamento até 2 h antes; arquivo .ics e confirmação no WhatsApp.
 
 **Painel (admin)**
 - Dashboard: faturamento, atendimentos, ticket médio e faltas com comparação ao período anterior;
@@ -48,7 +54,9 @@ Painel: `/#/admin`. No modo local, todos os acessos usam a senha `cereja123`:
 
 ## Ligar o Firebase (produção)
 
-1. Crie o projeto no console, ative **Authentication › E-mail/senha** e **Firestore**.
+1. Crie o projeto no console, ative **Authentication › E-mail/senha** com a opção
+   **Link do e-mail (login sem senha)** e o **Firestore**. Em Authentication › Configurações ›
+   Domínios autorizados, inclua o domínio onde o site vai ficar.
 2. Copie `.env.example` para `.env`, preencha as variáveis `VITE_FIREBASE_*` e use `VITE_DATA_PROVIDER=firebase`.
 3. Publique as regras: `firebase deploy --only firestore:rules` (arquivo `firestore.rules`).
 4. Cadastre a primeira administradora: crie o usuário no Authentication e o documento
@@ -64,6 +72,14 @@ Limites honestos do modo Firebase: o Pix estático não confirma o pagamento soz
 "Já paguei" e a equipe confere no banco); para baixa automática, integre um PSP (Mercado Pago, Efí, Asaas)
 com webhook numa Cloud Function. A troca de senha de outra pessoa é feita por e-mail de redefinição.
 As regras e o `FirebaseRepo` compilam, mas devem ser testados no emulador antes de ir ao ar.
+
+## Envio do código por e-mail (modo local)
+
+Sem configuração, o código aparece na tela com o aviso "Modo demonstração", para você apresentar o MVP.
+Para enviar de verdade sem backend, crie uma conta grátis no EmailJS, um template com destinatário
+`{{to_email}}` e o texto "Seu código Cereja é {{code}}", e preencha `VITE_EMAILJS_*` no `.env`.
+Atenção: no modo local o código é conferido no próprio navegador, o que serve para validar o produto,
+não como segurança de produção. Em produção use o modo Firebase, onde a verificação é feita pelo servidor.
 
 ## Adaptar para outra empresa
 

@@ -5,14 +5,13 @@ import { BUSINESS, brl, duration, fmtDate, fmtPhone, hm, nowInBusiness, onlyDigi
 import { CARD_PAYMENT_URL } from '../lib/pix'
 import { availableSlots, bookableDates, prosForService } from '../lib/scheduling'
 import type { Appointment, PaymentMethod } from '../lib/types'
-import { useDB, useRepo } from '../data/store'
+import { useCurrentClient, useDB, useRepo } from '../data/store'
 import { BookingConflictError } from '../data/repo'
 import { PixPayment } from './PixPayment'
 import { Button, Field, Input, Modal, cx, useToast } from './ui'
 
 type Step = 'service' | 'pro' | 'time' | 'details' | 'payment' | 'done'
 const ORDER: Step[] = ['service', 'pro', 'time', 'details', 'payment']
-const LAST_CLIENT = 'cereja.lastclient'
 
 export function BookingModal({
   open,
@@ -39,6 +38,7 @@ export function BookingModal({
   const [method, setMethod] = useState<PaymentMethod>('pix')
   const [saving, setSaving] = useState(false)
   const [booked, setBooked] = useState<Appointment | null>(null)
+  const client = useCurrentClient()
 
   useEffect(() => {
     if (!open) return
@@ -51,15 +51,9 @@ export function BookingModal({
     setNotes('')
     setBooked(null)
     if (source === 'site') {
-      try {
-        const last = JSON.parse(localStorage.getItem(LAST_CLIENT) || 'null')
-        if (last) {
-          setName(last.name)
-          setPhone(last.phone)
-        }
-      } catch {
-        /* ignora */
-      }
+      // dados vêm da conta verificada da cliente
+      setName(client?.name ?? '')
+      setPhone(client?.phone ?? '')
     } else {
       setName('')
       setPhone('')
@@ -96,6 +90,10 @@ export function BookingModal({
     if (!service || start === null) return
     setSaving(true)
     try {
+      // mantém a ficha da cliente atualizada se ela mudou nome ou WhatsApp
+      if (source === 'site' && client && (client.name !== name.trim() || client.phone !== onlyDigits(phone))) {
+        await repo.saveClientProfile({ name, phone })
+      }
       const appt = await repo.book({
         serviceId: service.id,
         proId,
@@ -107,13 +105,6 @@ export function BookingModal({
         paymentMethod: method,
         source,
       })
-      if (source === 'site') {
-        try {
-          localStorage.setItem(LAST_CLIENT, JSON.stringify({ name: name.trim(), phone: onlyDigits(phone) }))
-        } catch {
-          /* ignora */
-        }
-      }
       setBooked(appt)
       setStep('done')
       if (source === 'admin') toast('Agendamento criado')
@@ -308,6 +299,14 @@ export function BookingModal({
                 if (name.trim().length >= 2 && phoneOk) setStep('payment')
               }}
             >
+              {source === 'site' && client && (
+                <p className="flex items-center gap-2 rounded-2xl bg-ok/10 px-4 py-3 text-sm text-wine">
+                  <Check className="h-4 w-4 shrink-0 text-ok" />
+                  <span className="min-w-0">
+                    E-mail verificado: <b className="break-all">{client.email}</b>
+                  </span>
+                </p>
+              )}
               <Field label="Nome">
                 <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Como podemos te chamar?" autoComplete="name" required />
               </Field>

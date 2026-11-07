@@ -1,15 +1,16 @@
 import { motion } from 'framer-motion'
-import { AtSign, CalendarHeart, Clock, LockKeyhole, MapPin, MessageCircle, Navigation, Search, Star } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { AtSign, CalendarHeart, ChevronDown, Clock, LayoutDashboard, LockKeyhole, LogOut, MapPin, MessageCircle, Navigation, Star, UserRound } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { BookingModal } from '../components/Booking'
+import { ClientLogin, profileComplete } from '../components/ClientLogin'
 import { HeroScroll } from '../components/HeroScroll'
-import { Badge, Button, Card, Input, Logo, cx, useConfirm, useToast } from '../components/ui'
-import { BUSINESS, WEEKDAYS, brl, duration, fmtDate, fmtPhone, hm, nowInBusiness, onlyDigits, openStatus, whatsappLink } from '../lib/business'
+import { Badge, Button, Card, Logo, cx, useConfirm, useToast } from '../components/ui'
+import { BUSINESS, WEEKDAYS, brl, duration, fmtDate, hm, nowInBusiness, openStatus, whatsappLink } from '../lib/business'
 import { nextFreeToday } from '../lib/scheduling'
-import type { Appointment } from '../lib/types'
+import type { Appointment, StaffUser } from '../lib/types'
 import { publicStats } from '../data/statsHelper'
-import { useDB, useMinuteTick, useRepo } from '../data/store'
+import { ROLE_LABEL, can, useCurrentClient, useCurrentUser, useDB, useMinuteTick, useRepo } from '../data/store'
 
 const reveal = {
   initial: { opacity: 0, y: 32 },
@@ -20,25 +21,49 @@ const reveal = {
 
 export default function Home() {
   useMinuteTick()
-  const [booking, setBooking] = useState<{ open: boolean; serviceId?: string }>({ open: false })
-  const book = (serviceId?: string) => setBooking({ open: true, serviceId })
+  const client = useCurrentClient()
+  const staff = useCurrentUser()
+  const [booking, setBooking] = useState<{ open: boolean; serviceId?: string; source: 'site' | 'admin' }>({ open: false, source: 'site' })
+  const [login, setLogin] = useState<{ open: boolean; reason: 'agendar' | 'entrar'; serviceId?: string }>({ open: false, reason: 'entrar' })
   const status = openStatus()
+
+  // Agendar exige e-mail verificado. Recepção e administradora agendam em nome da cliente.
+  const book = (serviceId?: string) => {
+    if (staff && can(staff.role, 'agenda:all') && !client) return setBooking({ open: true, serviceId, source: 'admin' })
+    if (profileComplete(client)) return setBooking({ open: true, serviceId, source: 'site' })
+    setLogin({ open: true, reason: 'agendar', serviceId })
+  }
+  const staffBooks = !!staff && can(staff.role, 'agenda:all') && !client
 
   return (
     <div className="bg-blush font-sans text-wine">
-      <Nav status={status} onBook={() => book()} />
+      <Nav status={status} onBook={() => book()} onLogin={() => setLogin({ open: true, reason: 'entrar' })} />
       <HeroScroll onBook={() => book()} />
       <TopServices onBook={book} />
       <Team onBook={() => book()} />
       <Location status={status} />
-      <MyBookings />
+      <MyBookings onLogin={() => setLogin({ open: true, reason: 'entrar' })} onBook={() => book()} />
       <Footer />
       <div className="fixed inset-x-0 bottom-0 z-30 p-3 pb-[max(12px,env(safe-area-inset-bottom))] md:hidden">
         <Button size="lg" className="w-full shadow-lift" onClick={() => book()}>
-          <CalendarHeart className="h-5 w-5" /> Agendar agora
+          <CalendarHeart className="h-5 w-5" /> {staffBooks ? 'Agendar para cliente' : 'Agendar agora'}
         </Button>
       </div>
-      <BookingModal open={booking.open} initialServiceId={booking.serviceId} onClose={() => setBooking({ open: false })} />
+      <BookingModal
+        open={booking.open}
+        initialServiceId={booking.serviceId}
+        source={booking.source}
+        onClose={() => setBooking((b) => ({ ...b, open: false }))}
+      />
+      <ClientLogin
+        open={login.open}
+        reason={login.reason}
+        onClose={() => setLogin((l) => ({ ...l, open: false }))}
+        onDone={() => {
+          setLogin((l) => ({ ...l, open: false }))
+          if (login.reason === 'agendar') setBooking({ open: true, serviceId: login.serviceId, source: 'site' })
+        }}
+      />
     </div>
   )
 }
@@ -56,14 +81,16 @@ function StatusPill({ status, className }: { status: ReturnType<typeof openStatu
   )
 }
 
-function Nav({ status, onBook }: { status: ReturnType<typeof openStatus>; onBook: () => void }) {
+function Nav({ status, onBook, onLogin }: { status: ReturnType<typeof openStatus>; onBook: () => void; onLogin: () => void }) {
+  const client = useCurrentClient()
+  const staff = useCurrentUser()
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-line/50 bg-blush/75 backdrop-blur-md">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 md:px-8">
-        <a href="#inicio" aria-label="Cereja Esmalteria, início">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3 md:px-8">
+        <a href="#inicio" aria-label="Cereja Esmalteria, início" className="shrink-0">
           <Logo />
         </a>
-        <nav className="hidden items-center gap-1 rounded-full bg-white/80 p-1 text-sm font-semibold md:flex">
+        <nav className="hidden items-center gap-1 rounded-full bg-white/80 p-1 text-sm font-semibold lg:flex">
           {[
             ['#servicos', 'Serviços'],
             ['#equipe', 'Equipe'],
@@ -75,22 +102,119 @@ function Nav({ status, onBook }: { status: ReturnType<typeof openStatus>; onBook
             </a>
           ))}
         </nav>
-        <div className="flex items-center gap-2">
-          <StatusPill status={status} />
-          <Link
-            to="/admin"
-            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-wine px-3 text-sm font-semibold text-white transition hover:bg-wine/90"
-            aria-label="Área da equipe"
-          >
-            <LockKeyhole className="h-4 w-4" />
-            <span className="hidden lg:inline">Área da equipe</span>
-          </Link>
+        <div className="flex min-w-0 items-center gap-2">
+          <StatusPill status={status} className="hidden sm:inline-flex" />
+          <StatusDot status={status} className="sm:hidden" />
+          {staff ? (
+            <StaffShortcut user={staff} />
+          ) : (
+            <Link
+              to="/admin"
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-white px-3 text-sm font-semibold text-wine ring-1 ring-line/70 transition hover:bg-petal"
+              aria-label="Área da equipe"
+              title="Área da equipe"
+            >
+              <LockKeyhole className="h-4 w-4" />
+              <span className="hidden xl:inline">Equipe</span>
+            </Link>
+          )}
+          {client ? (
+            <AccountMenu />
+          ) : (
+            !staff && (
+              <Button size="sm" variant="dark" onClick={onLogin}>
+                <UserRound className="h-4 w-4" /> Entrar
+              </Button>
+            )
+          )}
           <Button size="sm" className="hidden md:inline-flex" onClick={onBook}>
             Agendar
           </Button>
         </div>
       </div>
     </header>
+  )
+}
+
+function StatusDot({ status, className }: { status: ReturnType<typeof openStatus>; className?: string }) {
+  return (
+    <span className={cx('relative flex h-3 w-3 shrink-0', className)} title={`${status.label} · ${status.detail}`} aria-label={status.label}>
+      {status.open && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-ok opacity-60" />}
+      <span className={cx('relative inline-flex h-3 w-3 rounded-full ring-2 ring-white', status.open ? 'bg-ok' : 'bg-cherry')} />
+    </span>
+  )
+}
+
+/** Atalho para quem é da equipe: aparece no lugar do "Entrar" quando há sessão de equipe. */
+function StaffShortcut({ user }: { user: StaffUser }) {
+  return (
+    <Link
+      to="/admin"
+      className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full bg-wine pl-1.5 pr-3.5 text-sm font-semibold text-white shadow-soft transition hover:bg-wine/90"
+    >
+      <span className="grid h-6 w-6 place-items-center rounded-full bg-cherry">
+        <LayoutDashboard className="h-3.5 w-3.5" />
+      </span>
+      <span>
+        Painel<span className="hidden sm:inline"> · {ROLE_LABEL[user.role]}</span>
+      </span>
+    </Link>
+  )
+}
+
+function AccountMenu() {
+  const client = useCurrentClient()!
+  const repo = useRepo()
+  const toast = useToast()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false)
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', esc)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', esc)
+    }
+  }, [open])
+  const first = client.name.split(' ')[0] || client.email.split('@')[0]
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="inline-flex h-9 max-w-[9rem] items-center gap-1.5 rounded-full bg-white pl-1 pr-2.5 text-sm font-semibold text-wine shadow-soft ring-1 ring-line/70 hover:bg-petal"
+      >
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-cherry font-display text-sm text-white">{first[0]?.toUpperCase()}</span>
+        <span className="truncate">{first}</span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 top-11 w-64 rounded-2xl bg-white p-2 shadow-lift ring-1 ring-line/70">
+          <div className="px-3 py-2">
+            <p className="truncate font-bold">{client.name || 'Minha conta'}</p>
+            <p className="truncate text-xs text-mauve">{client.email}</p>
+          </div>
+          <a role="menuitem" href="#meus" onClick={() => setOpen(false)} className="flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold hover:bg-petal">
+            <CalendarHeart className="h-4 w-4 text-cherry" /> Meus horários
+          </a>
+          <button
+            role="menuitem"
+            onClick={async () => {
+              setOpen(false)
+              await repo.logoutClient()
+              toast('Você saiu da sua conta')
+            }}
+            className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm font-semibold hover:bg-petal"
+          >
+            <LogOut className="h-4 w-4 text-mauve" /> Sair
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -353,55 +477,72 @@ const STATUS_LABEL: Record<Appointment['status'], string> = {
   faltou: 'Não compareceu',
 }
 
-function MyBookings() {
+function MyBookings({ onLogin, onBook }: { onLogin: () => void; onBook: () => void }) {
   const repo = useRepo()
   const db = useDB()
+  const client = useCurrentClient()
   const toast = useToast()
   const ask = useConfirm()
-  const [phone, setPhone] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem('cereja.lastclient') || 'null')?.phone ?? ''
-    } catch {
-      return ''
-    }
-  })
   const [list, setList] = useState<Appointment[] | null>(null)
   const now = nowInBusiness()
 
-  const search = async () => {
-    const found = await repo.findByPhone(phone)
-    setList(found.filter((a) => a.date >= now.date).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start)))
-  }
+  useEffect(() => {
+    let alive = true
+    if (!client) return setList(null)
+    repo.myAppointments().then((found) => {
+      if (!alive) return
+      setList(
+        found
+          .filter((a) => a.date >= now.date && a.status !== 'cancelado')
+          .sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start),
+      )
+    })
+    return () => {
+      alive = false
+    }
+  }, [repo, client, db.appointments, now.date])
+
   const cancel = async (a: Appointment) => {
     const minutesUntil = (Date.parse(a.date) - Date.parse(now.date)) / 60000 + a.start - now.minutes
     if (minutesUntil < 120) return toast('Faltam menos de 2 horas. Fale com a gente no WhatsApp.', 'bad')
     if (!(await ask({ title: 'Cancelar esse horário?', text: 'O horário fica livre para outra cliente.', confirmLabel: 'Cancelar horário', danger: true }))) return
-    await repo.cancelByClient(a.id, phone)
+    await repo.cancelMine(a.id)
     toast('Horário cancelado')
-    search()
   }
 
   return (
     <section id="meus" className="mx-auto max-w-3xl px-4 pb-24 md:px-8">
       <motion.div {...reveal}>
         <Card className="p-6 md:p-8">
-          <h2 className="font-display text-3xl">Meus horários</h2>
-          <p className="mt-1 text-sm text-mauve">Consulte ou cancele usando o WhatsApp do agendamento.</p>
-          <form
-            className="mt-4 flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (onlyDigits(phone).length >= 10) search()
-            }}
-          >
-            <Input value={fmtPhone(phone)} onChange={(e) => setPhone(onlyDigits(e.target.value).slice(0, 11))} placeholder="(75) 99999-9999" inputMode="tel" aria-label="WhatsApp" />
-            <Button type="submit" variant="dark" aria-label="Buscar">
-              <Search className="h-4 w-4" />
-            </Button>
-          </form>
-          {list && (
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-display text-3xl">Meus horários</h2>
+              <p className="mt-1 text-sm text-mauve">
+                {client ? (
+                  <>
+                    Conectada como <b className="break-all text-wine">{client.email}</b>
+                  </>
+                ) : (
+                  'Entre com seu e-mail para ver e cancelar seus horários.'
+                )}
+              </p>
+            </div>
+            {!client && (
+              <Button variant="dark" onClick={onLogin}>
+                <UserRound className="h-4 w-4" /> Entrar
+              </Button>
+            )}
+          </div>
+          {client && list && (
             <ul className="mt-4 space-y-2">
-              {list.length === 0 && <li className="text-sm text-mauve">Nenhum horário futuro encontrado.</li>}
+              {list.length === 0 && (
+                <li className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-blush p-4 text-sm text-mauve">
+                  Você não tem horários marcados.
+                  <Button size="sm" onClick={onBook}>
+                    Agendar agora
+                  </Button>
+                </li>
+              )}
               {list.map((a) => {
                 const s = db.services.find((x) => x.id === a.serviceId)
                 const p = db.pros.find((x) => x.id === a.proId)

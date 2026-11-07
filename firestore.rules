@@ -1,0 +1,74 @@
+rules_version = '2';
+// Regras do Firestore para a Cereja Esmalteria (modo VITE_DATA_PROVIDER=firebase).
+// Revise e teste no emulador antes de publicar em produção.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function profile() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function isStaff() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && profile().active == true; }
+    function isAdmin() { return isStaff() && profile().role == 'admin'; }
+    // Cliente: entrou pelo link de e-mail, então o e-mail está verificado
+    function isVerifiedClient() { return signedIn() && request.auth.token.email_verified == true; }
+
+    // Catálogo: público para leitura
+    match /services/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /pros/{id}     { allow read: if true; allow write: if isAdmin(); }
+    match /stats/{id}    { allow read: if true; allow write: if isStaff(); }
+
+    // Blocos de 15 min ocupados: sem dados pessoais. Criar só se ainda não existir (evita reserva dupla).
+    match /slots/{id} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasOnly(['apptId','proId','date','start','end'])
+                    && request.resource.data.end > request.resource.data.start;
+      allow delete: if isStaff()
+                    || get(/databases/$(database)/documents/appointments/$(resource.data.apptId)).data.status == 'cancelado'
+                    || getAfter(/databases/$(database)/documents/appointments/$(resource.data.apptId)).data.status == 'cancelado';
+      allow update: if false;
+    }
+
+    // Agendamentos: só cliente com e-mail verificado cria (em nome da própria conta), ou a equipe.
+    match /appointments/{id} {
+      function owner() { return signedIn() && resource.data.clientUid == request.auth.uid; }
+      allow get: if isStaff() || owner();
+      allow list: if isStaff() || (signedIn() && resource.data.clientUid == request.auth.uid);
+      allow create: if isStaff()
+                    || (isVerifiedClient()
+                        && request.resource.data.clientUid == request.auth.uid
+                        && request.resource.data.clientId == request.auth.uid
+                        && request.resource.data.clientEmail == request.auth.token.email
+                        && request.resource.data.status == 'agendado'
+                        && request.resource.data.payment.status == 'pendente'
+                        && request.resource.data.source == 'site');
+      // A cliente só pode cancelar o próprio horário ou avisar que pagou o Pix
+      allow update: if isStaff()
+                    || (owner()
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+                        && request.resource.data.status == 'cancelado')
+                    || (owner()
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['payment'])
+                        && request.resource.data.payment.status == 'em_analise'
+                        && resource.data.payment.status == 'pendente');
+      allow delete: if isAdmin();
+    }
+
+    // Ficha da cliente: o id é o uid do login. A própria cliente lê e edita nome/telefone.
+    match /clients/{id} {
+      allow read: if isStaff() || (signedIn() && request.auth.uid == id);
+      allow create, update: if isStaff()
+                    || (isVerifiedClient() && request.auth.uid == id
+                        && request.resource.data.keys().hasOnly(['name','phone','email','emailVerifiedAt','createdAt','lastContactAt'])
+                        && request.resource.data.email == request.auth.token.email
+                        && (!('lastContactAt' in request.resource.data) || request.resource.data.lastContactAt == resource.data.lastContactAt));
+      allow delete: if isAdmin();
+    }
+
+    match /users/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow write: if isAdmin();
+      // a própria pessoa só atualiza o horário do último acesso
+      allow update: if signedIn() && request.auth.uid == uid
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLoginAt']);
+    }
+  }
+}

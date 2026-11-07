@@ -2,17 +2,20 @@
 // Estrutura:
 //   services/{id}, pros/{id}              leitura pública, escrita da equipe
 //   slots/{proId_date_min}                blocos de 15 min ocupados (sem dados pessoais) — impede reserva dupla
-//   appointments/{id}                     dados completos; criação pública, leitura/edição pela equipe
-//   clients/{id}                          equipe
+//   appointments/{id}                     criação pela cliente logada; leitura da própria cliente e da equipe
+//   clients/{uid}                         ficha da cliente (uid do login por link de e-mail); equipe lê todas
 //   users/{uid}                           perfil e papel da equipe
 //   stats/public                          contagem de serviços exibida no site
 import { initializeApp, type FirebaseApp } from 'firebase/app'
 import {
   createUserWithEmailAndPassword,
   getAuth,
+  isSignInWithEmailLink,
   onAuthStateChanged,
   sendPasswordResetEmail,
+  sendSignInLinkToEmail,
   signInWithEmailAndPassword,
+  signInWithEmailLink,
   signOut,
   type Auth,
 } from 'firebase/auth'
@@ -20,6 +23,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   getFirestore,
   onSnapshot,
   query,
@@ -32,12 +36,13 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore'
 import { BUSINESS, addDays, nowInBusiness, onlyDigits, uid } from '../lib/business'
+import { isValidEmail, normalizeEmail } from '../lib/otp'
 import { analyticsForStats } from './statsHelper'
 import { availableSlots, pickPro } from '../lib/scheduling'
-import type { Appointment, Client, DB, Professional, Service, StaffUser } from '../lib/types'
-import { BookingConflictError, type BookingInput, type NewUserInput, type Repo } from './repo'
+import type { Appointment, Client, ClientAccount, DB, Professional, Service, StaffUser } from '../lib/types'
+import { BookingConflictError, LoginRequiredError, type BookingInput, type LoginRequest, type NewUserInput, type Repo } from './repo'
 
-const MY_BOOKINGS = 'cereja.mybookings'
+const EMAIL_FOR_SIGNIN = 'cereja.emailForSignIn'
 
 const config = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -71,6 +76,8 @@ export class FirebaseRepo implements Repo {
   private listeners = new Set<() => void>()
   private staffSubs: Unsubscribe[] = []
   private user: StaffUser | null = null
+  private client: ClientAccount | null = null
+  private linkHref: string | null = null
 
   async init() {
     if (!config.apiKey || !config.projectId) {
@@ -123,17 +130,36 @@ export class FirebaseRepo implements Repo {
       this.emit()
     })
 
+    // Volta do link de login enviado ao e-mail da cliente
+    if (isSignInWithEmailLink(this.auth, window.location.href)) {
+      this.linkHref = window.location.href
+      const saved = safeLocal(EMAIL_FOR_SIGNIN)
+      if (saved) await this.completeEmailLink(saved).catch(() => undefined)
+    }
+
     await new Promise<void>((resolve) => {
       onAuthStateChanged(this.auth, async (fbUser) => {
         this.staffSubs.forEach((u) => u())
         this.staffSubs = []
         this.user = null
+        this.client = null
         if (fbUser) {
           const snap = await getDoc(doc(this.fs, 'users', fbUser.uid))
           const profile = snap.exists() ? ({ id: snap.id, ...snap.data() } as StaffUser) : null
           if (profile?.active) {
             this.user = profile
             this.subscribeStaff()
+          } else if (fbUser.email && fbUser.emailVerified) {
+            // Cliente: login por link de e-mail (o próprio link comprova que o e-mail é dela)
+            const c = await getDoc(doc(this.fs, 'clients', fbUser.uid)).catch(() => null)
+            const data = (c?.exists() ? c.data() : {}) as Partial<Client>
+            this.client = {
+              id: fbUser.uid,
+              email: normalizeEmail(fbUser.email),
+              name: data.name ?? '',
+              phone: data.phone ?? '',
+              verifiedAt: data.emailVerifiedAt ?? new Date().toISOString(),
+            }
           }
         }
         if (!this.user) this.db = { ...this.db, appointments: this.busy, clients: [], users: [] }
@@ -176,7 +202,74 @@ export class FirebaseRepo implements Repo {
     }
   }
 
+  // ---------- Conta da cliente (link de login no e-mail) ----------
+
+  currentClient() {
+    return this.client
+  }
+
+  async requestClientLogin(email: string): Promise<LoginRequest> {
+    const key = normalizeEmail(email)
+    if (!isValidEmail(key)) throw new Error('Digite um e-mail válido.')
+    await sendSignInLinkToEmail(this.auth, key, {
+      url: window.location.origin + window.location.pathname,
+      handleCodeInApp: true,
+    })
+    safeLocal(EMAIL_FOR_SIGNIN, key)
+    return { method: 'link', sent: true }
+  }
+
+  async verifyClientCode(): Promise<ClientAccount> {
+    throw new Error('No Firebase a verificação é feita pelo link enviado ao e-mail.')
+  }
+
+  pendingEmailLink() {
+    return !!this.linkHref && !this.client
+  }
+
+  async completeEmailLink(email: string): Promise<ClientAccount> {
+    if (!this.linkHref) throw new Error('Abra o link que enviamos para o seu e-mail.')
+    try {
+      const cred = await signInWithEmailLink(this.auth, normalizeEmail(email), this.linkHref)
+      safeLocal(EMAIL_FOR_SIGNIN, null)
+      this.linkHref = null
+      window.history.replaceState(null, '', window.location.pathname + window.location.hash)
+      const now = new Date().toISOString()
+      await setDoc(doc(this.fs, 'clients', cred.user.uid), { email: normalizeEmail(email), emailVerifiedAt: now }, { merge: true })
+      const c = await getDoc(doc(this.fs, 'clients', cred.user.uid))
+      const data = (c.data() ?? {}) as Partial<Client>
+      this.client = { id: cred.user.uid, email: normalizeEmail(email), name: data.name ?? '', phone: data.phone ?? '', verifiedAt: now }
+      this.emit()
+      return this.client
+    } catch {
+      throw new Error('Link inválido ou expirado. Peça um novo link.')
+    }
+  }
+
+  async saveClientProfile(profile: { name: string; phone: string }): Promise<ClientAccount> {
+    if (!this.client) throw new LoginRequiredError()
+    const name = profile.name.trim()
+    const phone = onlyDigits(profile.phone)
+    if (name.length < 2) throw new Error('Informe seu nome.')
+    if (phone.length < 10) throw new Error('Informe um WhatsApp válido com DDD.')
+    await setDoc(
+      doc(this.fs, 'clients', this.client.id),
+      { name, phone, email: this.client.email, createdAt: this.client.verifiedAt },
+      { merge: true },
+    )
+    this.client = { ...this.client, name, phone }
+    this.emit()
+    return this.client
+  }
+
+  async logoutClient() {
+    await signOut(this.auth)
+  }
+
+  // ---------- Agendamento ----------
+
   async book(input: BookingInput): Promise<Appointment> {
+    if (input.source === 'site' && !this.client) throw new LoginRequiredError()
     const service = this.db.services.find((s) => s.id === input.serviceId && s.active)
     if (!service) throw new Error('Serviço indisponível.')
     const phone = onlyDigits(input.phone)
@@ -193,12 +286,14 @@ export class FirebaseRepo implements Repo {
     const proId = input.proId === 'any' ? pickPro(slot.proIds, this.busy, input.date) : input.proId
 
     const apptId = uid('a') + uid()
-    const clientId = 'c' + phone
+    const mine = input.source === 'site' && this.client
+    const clientId = mine ? this.client!.id : 'c' + phone
     const appt: Appointment = {
       id: apptId,
       clientId,
       clientName: input.name.trim(),
       clientPhone: phone,
+      ...(mine ? { clientEmail: this.client!.email, clientUid: this.client!.id } : {}),
       serviceId: service.id,
       proId,
       date: input.date,
@@ -222,48 +317,24 @@ export class FirebaseRepo implements Repo {
       const { id: _id, ...data } = appt
       tx.set(doc(this.fs, 'appointments', apptId), data)
     })
-    // Cadastro da cliente (criação pública permitida só com nome e telefone)
-    await setDoc(
-      doc(this.fs, 'clients', clientId),
-      { name: appt.clientName, phone, createdAt: appt.createdAt },
-      { merge: true },
-    ).catch(() => undefined)
-
-    this.remember(apptId)
+    if (!mine) {
+      // agendamento feito pela equipe: ficha pelo WhatsApp
+      await setDoc(doc(this.fs, 'clients', clientId), { name: appt.clientName, phone, createdAt: appt.createdAt }, { merge: true })
+    }
     return appt
   }
 
-  private remember(id: string) {
-    try {
-      const ids: string[] = JSON.parse(localStorage.getItem(MY_BOOKINGS) || '[]')
-      localStorage.setItem(MY_BOOKINGS, JSON.stringify([...new Set([id, ...ids])].slice(0, 20)))
-    } catch {
-      /* ignora */
-    }
+  async myAppointments() {
+    if (!this.client) return []
+    const snap = await getDocs(query(collection(this.fs, 'appointments'), where('clientUid', '==', this.client.id)))
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Appointment)
   }
 
-  /** No Firebase, só os agendamentos feitos neste aparelho podem ser consultados (o id é o comprovante). */
-  async findByPhone(phone: string) {
-    let ids: string[] = []
-    try {
-      ids = JSON.parse(localStorage.getItem(MY_BOOKINGS) || '[]')
-    } catch {
-      ids = []
-    }
-    const d = onlyDigits(phone)
-    const snaps = await Promise.all(ids.map((id) => getDoc(doc(this.fs, 'appointments', id)).catch(() => null)))
-    return snaps
-      .filter((s) => s?.exists())
-      .map((s) => ({ id: s!.id, ...s!.data() }) as Appointment)
-      .filter((a) => onlyDigits(a.clientPhone) === d)
-  }
-
-  async cancelByClient(id: string, phone: string) {
+  async cancelMine(id: string) {
     const snap = await getDoc(doc(this.fs, 'appointments', id))
-    if (!snap.exists() || onlyDigits((snap.data() as Appointment).clientPhone) !== onlyDigits(phone)) {
-      throw new Error('Agendamento não encontrado.')
-    }
-    await this.releaseAndSet(id, snap.data() as Appointment, { status: 'cancelado' })
+    const a = snap.data() as Appointment | undefined
+    if (!a || !this.client || a.clientUid !== this.client.id) throw new Error('Agendamento não encontrado.')
+    await this.releaseAndSet(id, a, { status: 'cancelado' })
   }
 
   async confirmPixSent(id: string) {
@@ -383,4 +454,15 @@ export class FirebaseRepo implements Repo {
     batch.delete(doc(this.fs, 'users', id))
     await batch.commit()
   }
+}
+
+function safeLocal(key: string, value?: string | null): string | null {
+  try {
+    if (value === undefined) return localStorage.getItem(key)
+    if (value === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, value)
+  } catch {
+    /* armazenamento bloqueado */
+  }
+  return null
 }

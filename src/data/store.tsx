@@ -66,6 +66,14 @@ export function useCurrentUser() {
   )
 }
 
+export function useCurrentClient() {
+  const repo = useRepo()
+  return useSyncExternalStore(
+    (fn) => repo.subscribe(fn),
+    () => repo.currentClient(),
+  )
+}
+
 /** Atualiza o componente a cada minuto (status aberto/fechado, horários que passaram). */
 export function useMinuteTick() {
   const [, setT] = useState(0)

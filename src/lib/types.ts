@@ -23,8 +23,19 @@ export interface Client {
   id: string
   name: string
   phone: string // só dígitos, com DDD
+  email?: string // presente quando a cliente tem conta verificada no site
+  emailVerifiedAt?: string
   createdAt: string
   lastContactAt?: string
+}
+
+/** Conta da cliente no site: e-mail verificado por código (ou link, no Firebase). */
+export interface ClientAccount {
+  id: string
+  email: string
+  name: string
+  phone: string
+  verifiedAt: string
 }
 
 export type AppointmentStatus = 'agendado' | 'confirmado' | 'concluido' | 'cancelado' | 'faltou'
@@ -36,6 +47,8 @@ export interface Appointment {
   clientId: string
   clientName: string
   clientPhone: string
+  clientEmail?: string
+  clientUid?: string // conta que fez o agendamento pelo site
   serviceId: string
   proId: string
   date: string // YYYY-MM-DD no fuso do salão
