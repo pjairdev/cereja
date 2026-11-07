@@ -1,100 +1,79 @@
-import { AnimatePresence, motion, useMotionValueEvent, useReducedMotion, useScroll, useSpring, useTransform } from 'framer-motion'
-import { ArrowDown, CalendarHeart, Clock, Palette, Sparkles } from 'lucide-react'
+import { AnimatePresence, motion, useMotionValueEvent, useReducedMotion, useScroll, useTransform } from 'framer-motion'
+import { ArrowDown, ArrowUpRight, CalendarHeart } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Button, cx } from './ui'
 
+// Quadros da mão já recortados (fundo transparente), gerados a partir do vídeo.
 const FRAME_COUNT = 81
 const frameSrc = (i: number) => `${import.meta.env.BASE_URL}frames/f${String(i).padStart(3, '0')}.webp`
+const FRAME_RATIO = 820 / 1286
 
-const STAGES = [
-  {
-    at: 0,
-    kicker: 'Esmalteria em Santo Amaro',
-    title: ['Unhas prontas', 'sem fila.'],
-    text: 'Role a página e veja uma mão ganhar vida. Depois é só escolher o horário — a agenda é de verdade.',
-    chips: [] as { icon: typeof Sparkles; label: string; pos: string }[],
-  },
-  {
-    at: 0.12,
-    kicker: '01 · a cor',
-    title: ['Escolha', 'a sua cor.'],
-    text: 'Do nude ao cereja intenso: mais de 120 cores, em esmalte comum ou gel que dura até 21 dias.',
-    chips: [
-      { icon: Palette, label: '+120 cores', pos: 'left-[-8%] top-[18%]' },
-      { icon: Clock, label: 'Gel dura 21 dias', pos: 'right-[-10%] bottom-[24%]' },
-    ],
-  },
-  {
-    at: 0.36,
-    kicker: '02 · o detalhe',
-    title: ['Arte feita', 'à mão.'],
-    text: 'Marmorizado, francesinha e foil dourado, unha por unha. Você mostra a referência, a gente reproduz.',
-    chips: [
-      { icon: Sparkles, label: 'Marmorizado', pos: 'right-[-8%] top-[22%]' },
-      { icon: Sparkles, label: 'Foil dourado', pos: 'left-[-10%] bottom-[30%]' },
-    ],
-  },
-  {
-    at: 0.68,
-    kicker: '03 · o resultado',
-    title: ['Pronta pra', 'brilhar.'],
-    text: 'Mão em 40 minutos, pé e mão em 80. Reserve em menos de um minuto e pague no Pix, no cartão ou aqui.',
-    chips: [{ icon: CalendarHeart, label: 'Agende em 1 minuto', pos: 'left-[-8%] top-[26%]' }],
-  },
+// Linha do tempo do scroll (0 a 1):
+//   0 – 0.80  a mão gira (quadro 0 → 80) e as legendas trocam
+//   0.80 – 0.95  círculo cereja cresce a partir da mão e cobre a tela
+//   0.90 – 1  frase final aparece dentro do círculo
+const SCRUB_END = 0.8
+const CIRCLE = [0.8, 0.95] as const
+
+// Cada legenda descreve o que a mão está mostrando naquele trecho do vídeo.
+const LOOKS = [
+  { from: 12, n: '01', label: 'A cor', name: 'Rosa cereja cremoso', text: 'Duas camadas e top coat. Brilho de gel sem cabine.' },
+  { from: 24, n: '02', label: 'A arte', name: 'Marmorizado com foil', text: 'Pintado à mão, unha por unha, com folha dourada.' },
+  { from: 48, n: '03', label: 'O detalhe', name: 'Francesinha nude', text: 'Base translúcida e ponta marmorizada.' },
+  { from: 64, n: '04', label: 'O resultado', name: 'Pronta pra brilhar', text: 'Mão em 40 minutos. Pé e mão em 80.' },
 ]
 
-function stageFor(p: number) {
-  let s = 0
-  STAGES.forEach((st, i) => p >= st.at && (s = i))
-  return s
+function lookFor(frame: number) {
+  let idx = -1
+  LOOKS.forEach((l, i) => frame >= l.from && (idx = i))
+  return idx
 }
 
 export function HeroScroll({ onBook }: { onBook: () => void }) {
   const sectionRef = useRef<HTMLElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const frameBoxRef = useRef<HTMLDivElement>(null)
   const images = useRef<HTMLImageElement[]>([])
   const target = useRef(0)
   const nudge = useRef(0)
   const current = useRef(-1)
   const drawn = useRef(-1)
-  const [stage, setStage] = useState(0)
+  const [look, setLook] = useState(-1)
   const [loaded, setLoaded] = useState(0)
   const reduce = useReducedMotion()
 
   const { scrollYProgress } = useScroll({ target: sectionRef, offset: ['start start', 'end end'] })
-  const smooth = useSpring(scrollYProgress, { stiffness: 120, damping: 30, mass: 0.4 })
-  const bgTextX = useTransform(smooth, [0, 1], ['4%', '-38%'])
-  const ringDash = useTransform(smooth, [0, 1], [0, 1])
-  const frameScale = useTransform(smooth, [0, 0.12, 0.85, 1], [0.92, 1, 1, 0.96])
-  const blobRotate = useTransform(smooth, [0, 1], [0, 140])
-  const hintOpacity = useTransform(smooth, [0, 0.06], [1, 0])
+  const bgTextX = useTransform(scrollYProgress, [0, 1], ['2%', '-45%'])
+  const hintOpacity = useTransform(scrollYProgress, [0, 0.04], [1, 0])
+  const circle = useTransform(scrollYProgress, [CIRCLE[0], CIRCLE[1]], [0, 150])
+  const clipPath = useTransform(circle, (r) => `circle(${r}% at 76% 62%)`)
+  const finalOpacity = useTransform(scrollYProgress, [0.9, 0.97], [0, 1])
+  const finalY = useTransform(scrollYProgress, [0.9, 1], [40, 0])
+  const handScale = useTransform(scrollYProgress, [0, SCRUB_END, CIRCLE[1]], [1, 1.04, 1.12])
 
-  // Pré-carrega os quadros (o primeiro com prioridade para aparecer logo)
+  // Pré-carrega os quadros
   useEffect(() => {
     let count = 0
-    const imgs: HTMLImageElement[] = []
-    for (let i = 0; i < FRAME_COUNT; i++) {
+    images.current = Array.from({ length: FRAME_COUNT }, (_, i) => {
       const img = new Image()
       img.decoding = 'async'
       img.src = frameSrc(i)
       img.onload = () => {
         count++
         setLoaded(count)
-        if (i === 0) drawn.current = -1
+        drawn.current = -1
       }
-      imgs.push(img)
-    }
-    images.current = imgs
+      return img
+    })
   }, [])
 
   useMotionValueEvent(scrollYProgress, 'change', (p) => {
-    target.current = p * (FRAME_COUNT - 1)
-    const s = stageFor(p)
-    setStage((prev) => (prev === s ? prev : s))
+    const frame = Math.min(1, p / SCRUB_END) * (FRAME_COUNT - 1)
+    target.current = frame
+    const l = lookFor(frame)
+    setLook((prev) => (prev === l ? prev : l))
   })
 
-  // Laço de desenho: interpola até o quadro alvo para o movimento ficar suave
+  // Laço de desenho: aproxima suavemente o quadro atual do quadro alvo
   useEffect(() => {
     let raf = 0
     const canvas = canvasRef.current!
@@ -123,16 +102,14 @@ export function HeroScroll({ onBook }: { onBook: () => void }) {
     const tick = () => {
       const goal = Math.max(0, Math.min(FRAME_COUNT - 1, target.current + nudge.current))
       if (current.current < 0) current.current = goal
-      current.current += (goal - current.current) * (reduce ? 1 : 0.18)
+      current.current += (goal - current.current) * (reduce ? 1 : 0.2)
       const idx = nearestLoaded(Math.round(current.current))
       if (idx >= 0 && idx !== drawn.current) {
         const img = images.current[idx]
-        const cw = canvas.width
-        const ch = canvas.height
-        const scale = Math.max(cw / img.naturalWidth, ch / img.naturalHeight)
-        const w = img.naturalWidth * scale
-        const h = img.naturalHeight * scale
-        ctx.drawImage(img, (cw - w) / 2, (ch - h) / 2, w, h)
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.imageSmoothingEnabled = true
+        ctx.imageSmoothingQuality = 'high'
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
         drawn.current = idx
       }
       raf = requestAnimationFrame(tick)
@@ -144,143 +121,139 @@ export function HeroScroll({ onBook }: { onBook: () => void }) {
     }
   }, [reduce])
 
-  // Interação com o ponteiro: inclina a moldura e "gira" a mão alguns quadros
-  const [tilt, setTilt] = useState({ x: 0, y: 0, gx: 50, gy: 30 })
+  // No computador, mover o mouse sobre a mão gira alguns quadros
   const onPointerMove = (e: React.PointerEvent) => {
     if (reduce || e.pointerType === 'touch') return
-    const r = frameBoxRef.current!.getBoundingClientRect()
-    const px = (e.clientX - r.left) / r.width - 0.5
-    const py = (e.clientY - r.top) / r.height - 0.5
-    nudge.current = px * 8
-    setTilt({ x: -py * 10, y: px * 12, gx: (px + 0.5) * 100, gy: (py + 0.5) * 100 })
-  }
-  const onPointerLeave = () => {
-    nudge.current = 0
-    setTilt({ x: 0, y: 0, gx: 50, gy: 30 })
+    const r = e.currentTarget.getBoundingClientRect()
+    nudge.current = ((e.clientX - r.left) / r.width - 0.5) * 8
   }
 
-  const st = STAGES[stage]
   const pct = Math.round((loaded / FRAME_COUNT) * 100)
+  const active = look >= 0 ? LOOKS[look] : null
 
   return (
-    <section ref={sectionRef} id="inicio" className="relative h-[360vh] bg-blush md:h-[420vh]" aria-label="Apresentação">
-      <div className="sticky top-0 flex h-[100svh] items-center overflow-hidden">
-        {/* fundo */}
+    <section ref={sectionRef} id="inicio" className="relative h-[420vh] bg-blush md:h-[500vh]" aria-label="Apresentação">
+      <div className="sticky top-0 h-[100svh] overflow-hidden">
+        {/* letreiro gigante ao fundo */}
         <motion.div
           aria-hidden
           style={{ x: bgTextX }}
-          className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 select-none whitespace-nowrap font-display text-[34vw] leading-none text-cherry/[0.06] md:text-[22vw]"
+          className="pointer-events-none absolute left-0 top-[46%] -translate-y-1/2 select-none whitespace-nowrap font-display text-[38vw] leading-none text-cherry/[0.05] md:text-[24vw]"
         >
-          cereja cereja cereja
+          cereja esmalteria
         </motion.div>
+
+        {/* mão recortada, encostada à direita e embaixo, como no vídeo */}
         <motion.div
-          aria-hidden
-          style={{ rotate: blobRotate }}
-          className="pointer-events-none absolute -right-[20vmax] -top-[18vmax] h-[60vmax] w-[60vmax] rounded-[42%_58%_63%_37%/41%_44%_56%_59%] bg-gradient-to-br from-cherry-soft/60 to-petal"
-        />
+          style={{ scale: handScale, transformOrigin: '80% 100%' }}
+          onPointerMove={onPointerMove}
+          onPointerLeave={() => (nudge.current = 0)}
+          className="absolute bottom-0 right-0 h-[54svh] md:h-[78svh]"
+        >
+          <canvas
+            ref={canvasRef}
+            className="h-full"
+            style={{
+              aspectRatio: String(FRAME_RATIO),
+              maxWidth: '100vw',
+              WebkitMaskImage: 'linear-gradient(to right, transparent 0, #000 18%), linear-gradient(to bottom, transparent 0, #000 10%)',
+              maskImage: 'linear-gradient(to right, transparent 0, #000 18%), linear-gradient(to bottom, transparent 0, #000 10%)',
+              WebkitMaskComposite: 'source-in',
+              maskComposite: 'intersect',
+            }}
+            role="img"
+            aria-label="Mão com unhas cereja e marmorizadas girando conforme a página rola"
+          />
+          {pct < 100 && (
+            <span className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-white/80 px-3 py-1 text-xs font-semibold text-wine backdrop-blur">
+              carregando {pct}%
+            </span>
+          )}
+        </motion.div>
 
-        <div className="relative mx-auto grid w-full max-w-6xl grid-cols-1 items-center gap-6 px-4 pt-16 md:grid-cols-[1.05fr_1fr] md:gap-10 md:px-8 md:pt-0">
-          {/* texto */}
-          <div className="order-2 md:order-1">
+        {/* texto à esquerda */}
+        <div className="relative mx-auto flex h-full max-w-6xl flex-col px-4 pt-20 md:justify-center md:px-8 md:pt-16">
+          <div className="max-w-[34rem] md:w-[50%] md:max-w-none">
             <AnimatePresence mode="wait">
-              <motion.div
-                key={stage}
-                initial={{ opacity: 0, y: 24, filter: 'blur(6px)' }}
-                animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-                exit={{ opacity: 0, y: -18, filter: 'blur(6px)' }}
-                transition={{ duration: 0.45, ease: [0.2, 0.7, 0.2, 1] }}
-              >
-                <p className="mb-2 text-xs font-bold uppercase tracking-[.2em] text-cherry md:mb-3 md:text-sm">{st.kicker}</p>
-                <h1 className="font-display text-[13vw] leading-[0.92] text-wine sm:text-6xl md:text-7xl lg:text-8xl">
-                  {st.title[0]}
-                  <br />
-                  <span className="text-cherry">{st.title[1]}</span>
-                </h1>
-                <p className="mt-3 max-w-md text-[15px] leading-relaxed text-mauve md:mt-5 md:text-lg">{st.text}</p>
-              </motion.div>
-            </AnimatePresence>
-
-            <div className="mt-8 hidden flex-wrap items-center gap-3 md:flex">
-              <Button size="lg" onClick={onBook}>
-                <CalendarHeart className="h-5 w-5" /> Agendar horário
-              </Button>
-              <a href="#servicos" className="text-sm font-semibold text-wine underline decoration-cherry/40 underline-offset-4 hover:decoration-cherry">
-                Ver serviços
-              </a>
-            </div>
-
-            <div className="mt-6 hidden items-center gap-2 md:flex" aria-hidden>
-              {STAGES.map((_, i) => (
-                <span
-                  key={i}
-                  className={cx('h-1.5 rounded-full transition-all duration-500', i === stage ? 'w-10 bg-cherry' : 'w-4 bg-cherry/20')}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* mão */}
-          <div className="order-1 flex justify-center md:order-2">
-            <motion.div style={{ scale: frameScale }} className="relative" ref={frameBoxRef} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave}>
-              <div
-                className="relative h-[46svh] w-[29svh] overflow-hidden rounded-[999px_999px_48px_48px] bg-petal shadow-lift ring-[6px] ring-white transition-transform duration-200 ease-out md:h-[68vh] md:w-[42.5vh]"
-                style={{ transform: `perspective(900px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)` }}
-              >
-                <canvas ref={canvasRef} className="h-full w-full" role="img" aria-label="Mão com unhas cereja decoradas, girando conforme a página rola" />
-                <div
-                  aria-hidden
-                  className="pointer-events-none absolute inset-0 mix-blend-soft-light"
-                  style={{ background: `radial-gradient(circle at ${tilt.gx}% ${tilt.gy}%, rgba(255,255,255,.55), transparent 45%)` }}
-                />
-                {pct < 100 && (
-                  <div className="absolute inset-x-0 bottom-4 flex justify-center">
-                    <span className="rounded-full bg-white/80 px-3 py-1 text-xs font-semibold text-wine backdrop-blur">carregando {pct}%</span>
+              {!active ? (
+                <motion.div
+                  key="intro"
+                  initial={{ opacity: 0, y: 24 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -24, filter: 'blur(6px)' }}
+                  transition={{ duration: 0.45, ease: [0.2, 0.7, 0.2, 1] }}
+                >
+                  <p className="mb-3 text-[11px] font-bold uppercase tracking-[.22em] text-mauve md:mb-5 md:text-xs">
+                    Cereja · Esmalteria em Santo Amaro
+                  </p>
+                  <h1 className="font-display text-[12.5vw] leading-[0.92] text-wine sm:text-6xl md:text-[4.4vw] xl:text-[64px]">
+                    Unhas prontas
+                    <br />
+                    <span className="text-cherry">sem fila.</span>
+                  </h1>
+                  <p className="mt-4 max-w-sm text-[15px] leading-relaxed text-mauve md:mt-6 md:text-base">
+                    Cutilagem, esmaltação em gel e nail art feita à mão. Escolha o horário pelo site e chegue só na hora.
+                  </p>
+                  <div className="mt-6 hidden items-center gap-5 md:flex">
+                    <Button onClick={onBook}>
+                      <CalendarHeart className="h-4 w-4" /> Agendar horário
+                    </Button>
+                    <a href="#servicos" className="inline-flex items-center gap-1 text-sm font-semibold text-wine hover:text-cherry">
+                      Ver serviços <ArrowUpRight className="h-4 w-4" />
+                    </a>
                   </div>
-                )}
-              </div>
-
-              {/* anel de progresso */}
-              <svg className="absolute -bottom-5 -left-5 h-16 w-16 md:-bottom-6 md:-left-6 md:h-20 md:w-20" viewBox="0 0 80 80" aria-hidden>
-                <circle cx="40" cy="40" r="34" fill="#fff" />
-                <circle cx="40" cy="40" r="28" fill="none" stroke="#ffe2de" strokeWidth="6" />
-                <motion.circle
-                  cx="40"
-                  cy="40"
-                  r="28"
-                  fill="none"
-                  stroke="#d8304a"
-                  strokeWidth="6"
-                  strokeLinecap="round"
-                  style={{ pathLength: ringDash, rotate: -90, transformOrigin: '50% 50%' }}
-                />
-                <text x="40" y="45" textAnchor="middle" className="fill-wine font-display" fontSize="15">
-                  {String(stage + 1).padStart(2, '0')}
-                </text>
-              </svg>
-
-              <AnimatePresence>
-                {st.chips.map((c) => (
-                  <motion.div
-                    key={stage + c.label}
-                    initial={{ opacity: 0, scale: 0.6, y: 10 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    transition={{ type: 'spring', stiffness: 380, damping: 22, delay: 0.1 }}
-                    className={cx(
-                      'absolute hidden items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-bold text-wine shadow-lift sm:flex',
-                      c.pos,
-                    )}
-                  >
-                    <c.icon className="h-4 w-4 text-cherry" /> {c.label}
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-            </motion.div>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={active.n}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -16 }}
+                  transition={{ duration: 0.4, ease: [0.2, 0.7, 0.2, 1] }}
+                  className="md:mt-[18vh]"
+                >
+                  {/* régua de progresso: um traço por visual */}
+                  <div className="mb-5 flex w-56 gap-1.5 md:w-72" aria-hidden>
+                    {LOOKS.map((l, i) => (
+                      <span key={l.n} className={cx('h-[3px] flex-1 rounded-full transition-colors duration-500', i <= look ? 'bg-cherry' : 'bg-cherry/15')} />
+                    ))}
+                  </div>
+                  <p className="flex items-baseline gap-3 text-xs font-bold uppercase tracking-[.2em] text-mauve">
+                    <span className="text-cherry">{active.n}</span> {active.label}
+                  </p>
+                  <h2 className="mt-2 font-display text-[10vw] leading-none text-wine sm:text-5xl md:text-[3.6vw] xl:text-[56px]">{active.name}</h2>
+                  <p className="mt-3 max-w-xs text-[15px] text-mauve md:text-base">{active.text}</p>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </div>
 
+        {/* círculo cereja que cresce a partir da mão e leva para a próxima parte */}
+        <motion.div style={{ clipPath }} className="absolute inset-0 z-10 grid place-items-center bg-cherry px-4">
+          <motion.div style={{ opacity: finalOpacity, y: finalY }} className="text-center text-white">
+            <p className="font-display text-[15vw] leading-[0.9] sm:text-7xl md:text-8xl lg:text-[112px]">
+              Sua unha,
+              <br />
+              <span className="text-cherry-soft">do seu jeito.</span>
+            </p>
+            <p className="mx-auto mt-5 max-w-md text-white/80 md:text-lg">Escolha a cor, a arte e o horário. A gente cuida do resto.</p>
+            <div className="mt-7 flex flex-wrap items-center justify-center gap-4">
+              <button
+                onClick={onBook}
+                className="inline-flex h-12 items-center gap-2 rounded-full bg-white px-6 font-bold text-cherry shadow-lift transition hover:bg-blush active:scale-[.97]"
+              >
+                <CalendarHeart className="h-5 w-5" /> Agendar horário
+              </button>
+              <a href="#servicos" className="inline-flex items-center gap-1 text-sm font-semibold text-white/90 hover:text-white">
+                Ver os mais pedidos <ArrowDown className="h-4 w-4" />
+              </a>
+            </div>
+          </motion.div>
+        </motion.div>
+
         <motion.div
-          className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-2 text-xs font-semibold text-mauve"
+          className="absolute bottom-24 left-4 z-20 flex items-center gap-2 text-xs font-semibold text-mauve md:bottom-5 md:left-8"
           style={{ opacity: hintOpacity }}
         >
           <ArrowDown className="h-4 w-4 animate-bounce" /> role para girar a mão
