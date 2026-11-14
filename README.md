@@ -86,10 +86,24 @@ não como segurança de produção. Em produção use o modo Firebase, onde a ve
 - `src/lib/business.ts`: nome, endereço, WhatsApp, horários e regras de agenda.
 - `src/data/seed.ts`: serviços, equipe e usuários iniciais.
 - `tailwind.config.js`: cores; fontes em `index.html` (Bagel Fat One + Figtree, as mesmas do MVP anterior).
-- `public/frames/`: quadros do hero. **Os quadros atuais vêm de um Reels de terceiros** e servem só
-  para o protótipo; troque por um vídeo da própria cliente antes de publicar. Para gerar quadros de um vídeo:
-  `ffmpeg -i video.mp4 -vf "fps=12,scale=420:-1" -c:v libwebp -quality 80 public/frames/f%03d.webp`
-  e ajuste `FRAME_COUNT` em `src/components/HeroScroll.tsx`.
+- `public/frames/`: 120 quadros do hero (`f000.webp` a `f119.webp`), com fundo transparente,
+  extraídos do vídeo `unhas-3s.mp4` (3 s, gerado no Luma AI). Veja "Trocar o vídeo do hero" abaixo.
+
+## Trocar o vídeo do hero
+
+O hero não toca o vídeo: ele desenha um quadro por vez num `<canvas>` conforme a rolagem, o que
+deixa o movimento preso ao scroll (para frente e para trás) e funciona igual em todos os navegadores.
+
+1. Prefira um vídeo curto (2 a 4 s), com a mão inteira e **fundo liso e neutro** (cinza ou branco).
+2. Extraia os quadros: `ffmpeg -i video.mp4 quadros/f%03d.png`
+3. Remova o fundo de cada quadro (o projeto usou `rembg` com o modelo `u2net`, somado a uma máscara
+   por saturação de cor para não perder pele) e salve como WebP com transparência em `public/frames/`,
+   numerados a partir de `f000.webp`.
+4. Em `src/components/HeroScroll.tsx`, ajuste `FRAME_COUNT` (número de quadros), `FRAME_RATIO`
+   (largura / altura) e os `from` de cada legenda em `LOOKS` (o quadro em que cada legenda aparece).
+
+Vídeos gerados por IA no plano gratuito costumam vir com marca d'água e uso só não comercial;
+para um site de cliente, exporte pelo plano pago, sem marca d'água.
 
 ## Estrutura
 
